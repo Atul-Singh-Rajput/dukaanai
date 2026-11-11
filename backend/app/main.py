@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.db.database import Base, engine
 from app.models.product import Product, StockMovement
+from app.models.sale import Sale, SaleItem
 from app.api.routes import router
 
 Base.metadata.create_all(bind=engine)

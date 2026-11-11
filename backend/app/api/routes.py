@@ -10,6 +10,10 @@ from app.models.demo import DemoShopMetrics
 from app.models.product import Product, StockMovement
 from app.schemas.dashboard import DashboardResponse
 from app.schemas.products import ProductOut, StockAdjustment
+from app.models.sale import Sale, SaleItem
+from app.schemas.sales import SaleCreate, SaleOut
+from datetime import datetime
+from sqlalchemy.exc import IntegrityError
 
 router = APIRouter(prefix="/api/v1", tags=["DukaanAI"])
 UPLOAD_DIR = Path(__file__).resolve().parents[1] / "uploads"
@@ -136,3 +140,59 @@ def adjust_stock(product_id: int, adjustment: StockAdjustment, db: Session = Dep
 def list_stock_movements(db: Session = Depends(get_db)):
     rows = db.query(StockMovement, Product.name).join(Product, Product.id == StockMovement.product_id).order_by(StockMovement.created_at.desc()).limit(100).all()
     return [{"id": m.id, "product_id": m.product_id, "product_name": name, "quantity_change": m.quantity_change, "reason": m.reason, "created_at": m.created_at} for m, name in rows]
+
+
+@router.post("/sales", response_model=SaleOut, status_code=201)
+def create_sale(payload: SaleCreate, db: Session = Depends(get_db)):
+    if payload.discount_paise < 0:
+        raise HTTPException(400, "Discount cannot be negative")
+    # Combine duplicate product rows so stock is checked and deducted exactly once.
+    quantities: dict[int, int] = {}
+    for item in payload.items:
+        quantities[item.product_id] = quantities.get(item.product_id, 0) + item.quantity
+    products: dict[int, Product] = {}
+    subtotal = 0
+    sale_items = []
+    for product_id, quantity in quantities.items():
+        product = db.get(Product, product_id)
+        if product is None:
+            raise HTTPException(404, f"Product {product_id} not found")
+        if product.stock_quantity < quantity:
+            raise HTTPException(400, f"Insufficient stock for {product.name}. Available: {product.stock_quantity}")
+        line_total = product.selling_price_paise * quantity
+        subtotal += line_total
+        products[product_id] = product
+        sale_items.append(SaleItem(product_id=product.id, product_name=product.name, unit=product.unit, quantity=quantity, unit_price_paise=product.selling_price_paise, line_total_paise=line_total))
+    if payload.discount_paise > subtotal:
+        raise HTTPException(400, "Discount cannot exceed subtotal")
+    total = subtotal - payload.discount_paise
+    received = payload.amount_received_paise if payload.amount_received_paise is not None else total
+    if payload.payment_method != "credit" and received < total:
+        raise HTTPException(400, "Amount received is less than the bill total")
+    if payload.payment_method == "credit":
+        received = 0
+    invoice = f"DA-{datetime.now().strftime('%y%m%d')}-{uuid4().hex[:6].upper()}"
+    sale = Sale(invoice_number=invoice, subtotal_paise=subtotal, discount_paise=payload.discount_paise, total_paise=total, payment_method=payload.payment_method, amount_received_paise=received, change_paise=max(0, received-total), customer_name=payload.customer_name.strip() if payload.customer_name else None, items=sale_items)
+    try:
+        for product_id, quantity in quantities.items():
+            product = products[product_id]
+            product.stock_quantity -= quantity
+            db.add(StockMovement(product_id=product_id, quantity_change=-quantity, reason=f"Sale {invoice}"))
+        db.add(sale)
+        db.commit()
+        db.refresh(sale)
+        return sale
+    except Exception:
+        db.rollback()
+        raise
+
+@router.get("/sales", response_model=list[SaleOut])
+def list_sales(limit: int = 50, db: Session = Depends(get_db)):
+    return db.query(Sale).order_by(Sale.created_at.desc()).limit(min(max(limit, 1), 100)).all()
+
+@router.get("/sales/{sale_id}", response_model=SaleOut)
+def get_sale(sale_id: int, db: Session = Depends(get_db)):
+    sale = db.get(Sale, sale_id)
+    if not sale:
+        raise HTTPException(404, "Sale not found")
+    return sale
