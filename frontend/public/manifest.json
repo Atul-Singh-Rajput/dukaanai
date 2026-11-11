@@ -1,0 +1,10 @@
+{
+  "name": "DukaanAI - Smart Kirana Manager",
+  "short_name": "DukaanAI",
+  "description": "Apni dukaan, ab apni awaaz se chalao.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f6f8f6",
+  "theme_color": "#176b45",
+  "icons": []
+}
